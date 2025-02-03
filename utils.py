@@ -1,296 +1,119 @@
-import os
-import numpy as np
-import pandas as pd
+import pandas as pd 
 from epiweeks import Week
-import scipy.stats as stats
 import matplotlib.pyplot as plt 
-import matplotlib.gridspec as gridspec
-from sklearn.base import BaseEstimator, RegressorMixin
 
-from scipy.optimize import minimize
-from scipy.stats import lognorm
+states_ne = ['AL', 'BA', 'CE', 'MA', 'PB', 'PE', 'PI', 'SE', 'RN']
+states_se = ['SP', 'RJ', 'ES', 'MG']
+states_sul = ['RS', 'SC', 'PR' ]
+states_ce = ['DF', 'MT', 'MS', 'GO']
+states_no = ['AP', 'TO', 'RR', 'RO', 'AM' ,'AC', 'PA']
 
-def replace_outliers_with_mean(arr, threshold=2):
-    # Step 1: Calculate the Z-scores
-    mean = np.mean(arr)
-    std = np.std(arr)
-    z_scores = (arr - mean) / std
+states_BR = states_ne+states_se+states_no+states_ce+states_sul
 
-    # Step 2: Identify outliers
-    outliers = np.abs(z_scores) > threshold
-
-    # Step 3: Replace outliers with the mean of non-outlier values
-    mean_non_outliers = np.mean(arr[~outliers])
-    arr[outliers] = mean_non_outliers
-
-    return arr
-
-
-
-def get_lognormal_pars(med, lwr, upr, alpha=0.95):
-    def loss2(theta):
-        tent_qs = lognorm.ppf([(1 - alpha) / 2, (1 + alpha) / 2], s=theta[1], scale=np.exp(theta[0]))
-        if lwr == 0:
-            attained_loss = abs(upr - tent_qs[1]) / upr
-        else:
-            attained_loss = abs(lwr - tent_qs[0]) / lwr + abs(upr - tent_qs[1]) / upr
-        return attained_loss
-
-    mustar = np.log(med)
-    opt_result = minimize(loss2, x0=[mustar, 0.5], bounds=[(-5 * abs(mustar), 5 * abs(mustar)), (0, 10)], method='L-BFGS-B')
-    
-    return opt_result.x
-    
-def get_cases(data, state):
-    '''
-    Function to filter the cases data by state
-    '''
-    data_ = data.loc[data.uf == state]
-    data_.loc[:, 'date']  = pd.to_datetime(data_.date)
-    data_ = data_.rename(columns = {'date':'dates'})
-    data_.set_index('dates', inplace = True)
-    
-    return data_
-
-def get_epiweek(date):
-    '''
-    Capturing the epidemiological year and week from the date 
-    '''
-    epiweek = Week.fromdate(date)
-    return (epiweek.year, epiweek.week)
-
-
-class SprintModel(BaseEstimator, RegressorMixin):
-    '''
-    A class to fetch the predictions in mosqlimate API as a model.
-
-    Attributes
-    ---------------
-    model_id: int. 
-            ID of the model in the mosqlimate API
-    state: str.
-            TWO letter adm-1 code for Brazil. 
-    mean: bool.
-            If True the pred column is returned. Otherwise the prediction is sampled from 
-            a {dist} distribution with mean = pred and std compute using lower and upper. 
-    dist:str.
-         Distribution to sample the predictions. Available options are `normal` and `poisson`.
-
-
-    Methods
-    --------------
-    fit():
-        It doesn't do anything, but you need this method to use stacking. 
-    predict()
-        Return the predictions based on a X that the first column refers to epidemiological year and the
-        second one to the epidemiological week. 
-    '''
-    def __init__(self, model_id, state, mean = True, dist = 'normal'):
-        # Initialize any parameters for the model
-        self.model_id = model_id
-        self.state = state
-        self.mean = mean 
-        self.dist = dist 
-
-        df1 = pd.read_csv(f'./predictions/preds_{model_id}_{state}_2023.csv.gz')
-        df1 = df1.dropna(axis =1)
-        
-        df2 = pd.read_csv(f'./predictions/preds_{model_id}_{state}_2024.csv.gz')
-        df2 = df2.dropna(axis =1)
-        df2 = df2.loc[df2.date <= '2024-06-02']
-
-        for_path = f'./predictions/preds_{model_id}_{state}_2025.csv.gz'
-
-        if os.path.exists(for_path):
-            df3 = pd.read_csv(for_path)
-            df3 = df3.dropna(axis =1)
-            df = pd.concat([df1,df2,df3])
-     
-        else:
-            df = pd.concat([df1,df2])
-
-        df['epiweek'] = pd.to_datetime(df['date']).apply(get_epiweek)
-        df['epi_year'] = df['epiweek'].apply(lambda x: x[0])
-        df['epi_week'] = df['epiweek'].apply(lambda x: x[1])
-        df.drop(['epiweek'], axis =1, inplace = True)
-        df = df.reset_index(drop = True)
-
-        self.df = df
-
-    def fit(self, X, y):
-
-        return self
-
-    def predict(self, X, samples=1):
-        '''
-        Return the predictions based on an X that the first column refers to the epidemiological year and the
-        second one to the epidemiological week. If mean == True, the predict returned refers to the `pred` columns 
-        in the API. Otherwise the predict value will be sampled based on the normal or poisson distribution considering 
-        a confidence interval of 90% for the predictions registered in the platform and using the columns `pred`, `lower`m
-        and `upper` registered in the API. 
-        '''
-        df = self.df
-        if self.mean:
-            preds = []
-            for i in np.arange(0, X.shape[0]):
-
-                preds.append(df.loc[(df.epi_year == X[i,0]) & (df.epi_week == X[i,1])].pred.values[0]
-                           )
-                
-        else:
-            if self.dist == 'normal':
-                confidence_level = 0.9
-                z_value = stats.norm.ppf((1 + confidence_level) / 2)
-                # calculate the standard deviation from interval size
-                df['std_dev'] = (df.upper - df.lower)/(2*z_value)
-                
-                preds = []
-                for i in np.arange(0, X.shape[0]):
-                    df_ = df.loc[(df.epi_year == X[i,0]) & (df.epi_week == X[i,1])]
-                    # upper = df_.upper.values[0]
-                    # lower = df_.lower.values[0]
-                    # mean = df_.pred.values[0]
-                    mean = df_.pred.values[0]
-                    std_dev = df_.std_dev.values[0]
-                    
-                    # std_dev = (upper - lower)/(2*z_value)
-    
-                    preds.append(np.array([0 if p < 0 else p for p in  np.random.normal(mean, std_dev, samples)]))
-
-            elif self.dist == 'poisson':
-                preds = []
-                for i in np.arange(0, X.shape[0]):
-                    df_ = df.loc[(df.epi_year == X[i,0]) & (df.epi_week == X[i,1])]
-                    mean = df_.pred.values[0]
-                    preds.append(np.random.poisson(mean, size = samples))
-
-            elif self.dist == 'lognormal':
-                preds = []
-                for i in np.arange(0, X.shape[0]):
-                    df_ = df.loc[(df.epi_year == X[i,0]) & (df.epi_week == X[i,1])]
-
-                    if df_.pred.values[0]!= 0:
-                        mean, std = get_lognormal_pars(df_.pred.values[0], 
-                                                       df_.lower.values[0], 
-                                                       df_.upper.values[0],
-                                                       alpha=0.9)
-
-                    
-                        predicted_values = np.random.lognormal(mean, std, size = samples)
-                        preds.append(replace_outliers_with_mean(predicted_values))
-                            
-                    else: 
-                        preds.append(np.zeros(samples,))
-
-        return np.array(preds) #[pred[0]]*len(X)
-
-
-def get_data_slice(data, state, start_date = Week(2022, 40).startdate().strftime('%Y-%m-%d'), 
-                                    end_date = '2024-06-02'):
-    '''
-    Function to get the samples to train the model for a specific state in a range of dates. 
-    '''
-        
-    dates = pd.date_range(start= start_date,
-              end= end_date,
+dates_23 = pd.date_range(start= Week(2022, 41).startdate().strftime('%Y-%m-%d'),
+              end= Week(2023, 39).startdate().strftime('%Y-%m-%d'),
               freq='W-SUN')
 
-    df_ = get_cases(data, state)
-    y = df_.loc[dates].casos.values
-
-    X = pd.DataFrame()
-    X['date'] = dates
-    X['epiweek'] = pd.to_datetime(X['date']).apply(get_epiweek)
-            
-    # If you want separate columns for year and week
-    X['epi_year'] = X['epiweek'].apply(lambda x: x[0])
-    X['epi_week'] = X['epiweek'].apply(lambda x: x[1])
-            
-    X.drop(['epiweek', 'date'], axis =1, inplace = True)
-    
-    return X, y
-
-
-def get_forecast_X(start_date = Week(2022, 40).startdate().strftime('%Y-%m-%d'), 
-                                    end_date = '2024-06-02'):
-    '''
-    Function to get the samples to train the model for a specific state in a range of dates. 
-    '''
-        
-    dates = pd.date_range(start= start_date,
-              end= end_date,
+dates_24 = pd.date_range(start= Week(2023, 41).startdate().strftime('%Y-%m-%d'),
+              end= Week(2024, 23).startdate().strftime('%Y-%m-%d'),
               freq='W-SUN')
 
+dates_25 = pd.date_range(start= Week(2024, 41).startdate().strftime('%Y-%m-%d'),
+              end= Week(2025, 40).startdate().strftime('%Y-%m-%d'),
+              freq='W-SUN')
 
-    X = pd.DataFrame()
-    X['date'] = dates
-    X['epiweek'] = pd.to_datetime(X['date']).apply(get_epiweek)
-            
-    # If you want separate columns for year and week
-    X['epi_year'] = X['epiweek'].apply(lambda x: x[0])
-    X['epi_week'] = X['epiweek'].apply(lambda x: x[1])
-            
-    X.drop(['epiweek', 'date'], axis =1, inplace = True)
-    
-    return X
-    
+UNIQUE_MODELS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'ln_base', 'ln_crps', 'ln_log', 'lin_crps', 'lin_log']
+# Define colors manually, mapping each region to a color from tab10
+colors = plt.get_cmap('Set3').colors[:len(UNIQUE_MODELS)]
+COLOR_MAP = dict(zip(UNIQUE_MODELS, colors))
 
-def plot_coef(df_coef): 
+def format_data(state, models_by_state, data_all, df_preds_all): 
     '''
-    Function to plot the coeficients of the LASSO regression for each state
+    Function to organize the predictions and data available by season
     '''
-    fig = plt.figure(figsize=(15, 7.5))
-    gs = gridspec.GridSpec(2, 6, figure=fig)
+    models = sorted(models_by_state.loc[models_by_state.state == state]['model_id'].values[0])
+        
+    data = data_all.loc[data_all.uf == state].reset_index(drop = True)
     
-    # First row with three boxplots
-    ax1 = fig.add_subplot(gs[0, 0:2])
-    ax2 = fig.add_subplot(gs[0, 2:4])
-    ax3 = fig.add_subplot(gs[0, 4:6])
+    data_23 = data.loc[data.date.isin(dates_23)]
+    data_24 = data.loc[data.date.isin(dates_24)]
     
-    # Second row with two boxplots
-    ax4 = fig.add_subplot(gs[1, 1:3])
-    ax5 = fig.add_subplot(gs[1, 3:5])
+    preds = df_preds_all.loc[df_preds_all.state == state]
+        
+    preds.date = pd.to_datetime(preds.date)
     
-    # Plot the boxplots
-    df_coef_ = df_coef.loc[df_coef.state == 'AM']
-    
-    ax1.bar(df_coef_.model_id, df_coef_.coef)
-    
-    ax1.set_title('AM')
-    
-    df_coef_ = df_coef.loc[df_coef.state == 'CE']
-    
-    ax2.bar(df_coef_.model_id, df_coef_.coef)
-    
-    ax2.set_title('CE')
-    
-    df_coef_ = df_coef.loc[df_coef.state == 'GO']
-    
-    ax3.bar(df_coef_.model_id, df_coef_.coef)
-    
-    ax3.set_title('GO')
-    
-    df_coef_ = df_coef.loc[df_coef.state == 'PR']
-    
-    ax4.bar(df_coef_.model_id, df_coef_.coef)
-    
-    ax4.set_title('PR')
-    
-    df_coef_ = df_coef.loc[df_coef.state == 'MG']
-    
-    ax5.bar(df_coef_.model_id, df_coef_.coef)
-    
-    ax5.set_title('MG')
+    preds_23 = preds.loc[preds.date.isin(dates_23)]
+    preds_23 = preds_23.drop_duplicates(subset=['date', 'model_id'], keep='first').reset_index(drop=True)
+        
+    preds_24 = preds.loc[preds.date.isin(dates_24)]
+    preds_24 = preds_24.drop_duplicates(subset=['date', 'model_id'], keep='first').reset_index(drop=True)
+    preds_25 = preds.loc[preds.date.isin(dates_25)]
+    preds_25 = preds_25.drop_duplicates(subset=['date', 'model_id'], keep='first').reset_index(drop=True)
 
-    fig.suptitle('LASSO coeficients', fontsize = 14)
+
+    return data_23, data_24, preds_23, preds_24, preds_25, models
+
+
+def load_preds(exclude = True, rename = True):
+    '''
+    Function to load the predictions and actual data to make de figures 
+    '''
+    # get the predictions from the separated models: 
+    df_preds_all = pd.read_csv('../predictions/preds_models.csv.gz', index_col = 'Unnamed: 0')
+    df_preds_all = df_preds_all.rename(columns = {'adm_1': 'state'})
+    df_preds_all['model_id'] = df_preds_all['model_id'].replace({26:25})
+    # df_preds_all = df_preds_all.loc[(df_preds_all.model_id != 21) & (df_preds_all.model_id != 25)]
+    df_preds_all.model_id = df_preds_all.model_id.astype(int)
+
+    df_preds_all = df_preds_all.sort_values(by = 'model_id')
     
+    if exclude: 
+    # excluindo linhas com previsões com alguma inconsistência: 
+        df_preds_problem = df_preds_all.loc[df_preds_all.pred <= 0.1]
+        
+        excluded_models = list(set(zip(df_preds_problem.model_id, df_preds_problem.state)))
+        
+        df_preds_all = df_preds_all[~df_preds_all.apply(lambda row: (row['model_id'], row['state']) in excluded_models, axis=1)]
     
-    for ax_ in [ax1,ax2,ax3,ax4,ax5]:
-        ax_.set_ylabel('Coeficient')
-        ax_.set_xlabel('Model id')
+    models_by_state = df_preds_all.groupby('state')['model_id'].agg(lambda x: sorted(list(set(x)))).reset_index()
+
+    df_preds_all.date = pd.to_datetime(df_preds_all.date)
+
+    df_preds_all['model_id'] = df_preds_all['model_id'].astype(str)
     
-    # Adjust layout
-    plt.tight_layout()
+    # get the predictions from the ensemble baseline:
+    df_base = pd.read_csv('../predictions/ensemble_2023_2024_base_log_normal.csv')
+    df_base.date = pd.to_datetime(df_base.date)
+    df_base['model_id'] = 'ln_base'
     
-    plt.show()
+    # get the in sample preds using CRPS and Log Score for 2023
     
+    df_crps = pd.read_csv('../predictions/ensemble_2023_2024_E2.csv')
+    df_crps.date = pd.to_datetime(df_crps.date)
+    df_crps['model_id'] = 'ln_crps'
+    
+    df_ls = pd.read_csv('../predictions/ensemble_2023_2024_log_score_log_normal.csv')
+    df_ls.date = pd.to_datetime(df_ls.date)
+    df_ls['model_id'] = 'ln_log'
+
+    df_crps_mix = pd.read_csv('../predictions/ensemble_2023_2024_crps_lin_ln.csv')
+    df_crps_mix['model_id'] = 'lin_crps'
+
+    df_log_mix = pd.read_csv('../predictions/ensemble_2023_2024_log_score_lin_ln.csv')
+    df_log_mix['model_id'] = 'lin_log'
+
+    df_preds = pd.concat([df_preds_all, df_base, df_crps, df_ls, df_crps_mix, df_log_mix])
+    df_preds.date = pd.to_datetime(df_preds.date)
+
+    if rename: 
+        replace_models_name  ={'21':'M1', '22':'M2',
+                            '25':'M3', '26':'M3', '27':'M4',
+                            '28':'M5', '30':'M6',
+                            '34':'M7'}
+        
+        df_preds['model_id'] = df_preds['model_id'].replace(replace_models_name)
+
+    data_all = pd.read_csv('../data/dengue_uf.csv.gz')
+    data_all.date = pd.to_datetime(data_all.date)
+
+    return df_preds, models_by_state, data_all

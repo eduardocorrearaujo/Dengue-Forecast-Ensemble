@@ -54,17 +54,22 @@ There are seven teams participating in the Dengue 2024 Sprint that were released
 
 ### Models description
 
-### Predictions
+### Code organization
 
+The `utils.py` contains the code used by the `paper` and `paper_sprint` folders. 
 
+The `stacking` folder contain the code to generate the ensemble using the first methodoly proposed using stacking regression in scikit-learn. Since we can't compute confidence interval using this method we applied a new one based on mixture of distributions. 
 
-## Forecast Evaluation
-The Mosqlimate group evaluated the performance of each model using a set of scores. The logarithmic score, CRPS and the interval score were computed using the 'ScoringRules Python package'. Other metrics were calculated as additional feedback for the teams, without affecting the classification of the models, such as (i) average scores in these regions of interest in the prediction window, considering epidemic onset (weeks between growth start and the peak) and epidemic peak (3 week window centered on the peak) and (ii) the time lag, maximizing cross-correlation between forecasts and data
+The `saved_models` folder contain the models created using the `stacking` methodology.
 
-## Ranking:
+In the `predictions` folder are saved the predictions fetch from the mosqlimate platform and the ensemble predictions generated.
 
-Individual scores were calculated for each state and each year, corresponding to test 1 and test 2. Based on these scores, the concordance models were classified with different challenges. For each year and state, the models were assessed according the score and the predicted epidemiological week, for each year and state. At the end, a global ranking was calculated using a similar method. 
+In the `paper` folder are saved the code used to generated the analysis for the Methodology paper about the ensemble methods developded by the group. 
 
-For the emsemble, the models werw added to the set incrementally, following the raking order until there is no further improvement in performance.
+In the `paper` folder are saved the code used to generate the figures of the Sprint paper. 
 
-The dettailed results are available in this repository.
+In the `figures` folder are saved the figures.
+
+In the `data` folder are saved the data of probable dengue cases. 
+
+In the `bayes_ensemble` folder are saved the code that contains the ensemble methodology proposed based on mixture of distributions. 
